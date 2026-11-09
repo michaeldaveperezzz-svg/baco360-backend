@@ -10,6 +10,7 @@ define('PREVENT_DIRECT_ACCESS', TRUE);
 $allowed_origins = [
     'http://localhost:5173',
     'https://baco360-frontend.vercel.app',
+    'https://baco360-frontend1.vercel.app',
 ];
 
 $frontend_url = getenv('FRONTEND_URL');
