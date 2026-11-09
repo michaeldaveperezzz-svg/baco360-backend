@@ -183,6 +183,12 @@ $database['main'] = array(
 $config['base_url'] = 'http://localhost:3000/';
 ```
 
+### Email verification
+
+For Gmail, set `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, and `SMTP_ENCRYPTION=starttls` in `baco360backend/.env`. Set `SMTP_USERNAME` and `EMAIL_FROM` to the same Gmail address, and set `SMTP_PASSWORD` to a Google App Password (not the regular Gmail password). App Passwords require 2-Step Verification. Keep these credentials on the backend and never put them in the frontend `.env`.
+
+Run the backend migrations to create `email_verification_tokens` before enabling registration. New residents receive a six-digit verification code after registration. Codes expire after 15 minutes, and resend requests are limited to one per minute.
+
 ---
 
 ## Building a REST API

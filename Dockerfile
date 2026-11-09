@@ -4,6 +4,8 @@ FROM php:${PHP_VERSION}-apache
  
 # Install PDO MySQL
 RUN docker-php-ext-install pdo pdo_mysql
+
+RUN printf 'upload_max_filesize=55M\npost_max_size=260M\n' > /usr/local/etc/php/conf.d/uploads.ini
  
 # Enable Apache mod_rewrite
 RUN a2enmod rewrite

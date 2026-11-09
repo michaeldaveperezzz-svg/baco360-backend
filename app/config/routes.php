@@ -45,3 +45,98 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 /** @var object $router **/
 
 $router->get('/', 'Welcome::index');
+
+// Migration Routes
+    $router->get('create-migration/{migration_class}', 'MigrationController::create_migration');
+    $router->get('migrate', 'MigrationController::migrate');
+    $router->get('rollback', 'MigrationController::rollback');
+    $router->get('rollback-all', 'MigrationController::rollback_all');
+    $router->get('refresh', 'MigrationController::refresh');
+    $router->get('status', 'MigrationController::status');
+
+    // Authentication and profile
+    $router->post('api/auth/login', 'AuthController::login');
+    $router->post('api/login', 'AuthController::login');
+    $router->post('api/auth/register', 'AuthController::register');
+    $router->post('api/auth/verify-email', 'AuthController::verifyEmail');
+    $router->post('api/auth/resend-verification', 'AuthController::resendVerification');
+    $router->post('api/auth/forgot-password', 'AuthController::forgotPassword');
+    $router->post('api/auth/reset-password', 'AuthController::resetPassword');
+    $router->post('api/auth/logout', 'AuthController::logout');
+    $router->post('api/auth/refresh', 'AuthController::refresh');
+    $router->get('api/user/me', 'AuthController::me');
+    $router->put('api/user/profile', 'AuthController::updateProfile');
+    $router->post('api/user/profile/contact-change', 'AuthController::requestContactChange');
+    $router->post('api/user/profile/contact-change/verify', 'AuthController::verifyContactChange');
+    $router->put('api/user/password', 'AuthController::changePassword');
+    $router->put('api/user/notification-settings', 'AuthController::updateNotificationSettings');
+    $router->get('api/user/resident-profile', 'ProfilesController::residentProfile');
+    $router->put('api/user/resident-profile', 'ProfilesController::updateResidentProfile');
+    $router->post('api/user/profile-photo', 'ProfilesController::uploadProfilePhoto');
+    $router->delete('api/user/profile-photo', 'ProfilesController::removeProfilePhoto');
+    $router->get('api/user/profile-photo/{id}', 'ProfilesController::showProfilePhoto');
+    $router->get('api/admin/resident-profiles', 'ProfilesController::verificationQueue');
+    $router->patch('api/admin/resident-profiles/{id}/verification', 'ProfilesController::updateAddressVerification');
+
+    // Reports
+    $router->get('api/reports', 'ReportsController::index');
+    $router->post('api/reports', 'ReportsController::store');
+    $router->get('api/reports/{id}', 'ReportsController::show');
+    $router->patch('api/reports/{id}', 'ReportsController::update');
+    $router->delete('api/reports/{id}', 'ReportsController::destroy');
+    $router->post('api/reports/{id}/comments', 'ReportsController::addComment');
+    $router->post('api/reports/{id}/attachments', 'ReportsController::uploadAttachments');
+    $router->get('api/reports/{id}/attachments/{attachmentId}', 'ReportsController::downloadAttachment');
+    $router->post('api/reports/{id}/assign', 'ReportsController::assign');
+
+    // Resolved community reports for residents
+    $router->get('api/community/reports', 'CommunityReportsController::index');
+    $router->get('api/community/reports/{id}/comments', 'CommunityReportsController::comments');
+    $router->post('api/community/reports/{id}/comments', 'CommunityReportsController::addComment');
+    $router->put('api/community/reports/{id}/heart', 'CommunityReportsController::setHeart');
+
+    // Issue categories
+    $router->get('api/categories', 'CategoriesController::index');
+    $router->post('api/categories', 'CategoriesController::store');
+    $router->get('api/categories/{id}', 'CategoriesController::show');
+    $router->put('api/categories/{id}', 'CategoriesController::update');
+    $router->put('api/categories/{id}/toggle', 'CategoriesController::toggle');
+    $router->delete('api/categories/{id}', 'CategoriesController::destroy');
+
+    // Administrator user management
+    $router->get('api/admin/users', 'UsersController::index');
+    $router->post('api/admin/users', 'UsersController::store');
+    $router->get('api/admin/users/{id}', 'UsersController::show');
+    $router->put('api/admin/users/{id}', 'UsersController::update');
+    $router->delete('api/admin/users/{id}', 'UsersController::destroy');
+    $router->get('api/admin/audit-logs', 'AdminController::auditLogs');
+    $router->get('api/admin/email-deliveries', 'AdminController::emailDeliveries');
+    $router->get('api/dashboard/stats', 'AdminController::dashboardStats');
+
+    // Public website content and administrator content management
+    $router->get('api/website-content', 'WebsiteContentController::index');
+    $router->get('api/website-content/media/{fileName}', 'WebsiteContentController::media');
+    $router->get('api/admin/website-content', 'WebsiteContentController::adminIndex');
+    $router->put('api/admin/website-content/settings', 'WebsiteContentController::updateSettings');
+    $router->post('api/admin/website-content/images', 'WebsiteContentController::uploadImage');
+    $router->post('api/admin/website-content/{collection}', 'WebsiteContentController::collectionCreate');
+    $router->put('api/admin/website-content/{collection}/{id}', 'WebsiteContentController::collectionUpdate');
+    $router->delete('api/admin/website-content/{collection}/{id}', 'WebsiteContentController::collectionDelete');
+
+    // Notifications
+    $router->get('api/announcements', 'AnnouncementsController::index');
+    $router->get('api/announcements/recipients', 'AnnouncementsController::recipients');
+    $router->post('api/announcements', 'AnnouncementsController::publish');
+    $router->put('api/announcements/{id}', 'AnnouncementsController::update');
+    $router->delete('api/announcements/{id}', 'AnnouncementsController::destroy');
+    $router->patch('api/announcements/{id}/archive', 'AnnouncementsController::archive');
+    $router->patch('api/announcements/{id}/restore', 'AnnouncementsController::restore');
+    $router->patch('api/announcements/{id}/read', 'AnnouncementsController::markRead');
+    $router->get('api/community-events', 'CommunityEventsController::index');
+    $router->post('api/community-events', 'CommunityEventsController::create');
+    $router->delete('api/community-events/{id}', 'CommunityEventsController::destroy');
+    $router->get('api/notifications', 'NotificationsController::index');
+    $router->patch('api/notifications/{id}/read', 'NotificationsController::markRead');
+    $router->patch('api/notifications/read-all', 'NotificationsController::markAllRead');
+    $router->delete('api/notifications', 'NotificationsController::destroyAll');
+    $router->delete('api/notifications/{id}', 'NotificationsController::destroy');

@@ -231,23 +231,34 @@ class Api
     public function body()
     {
         $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+        $raw = $this->read_raw_body();
 
         if (stripos($contentType, 'application/json') !== false) {
-            $raw = $this->read_raw_body();
-            if ($raw === '') return [];
+            if ($raw === '') {
+                if (!empty($_POST)) {
+                    return $this->sanitize_input($_POST);
+                }
+                return [];
+            }
 
             $input = json_decode($raw, true, 32);
-            if (!is_array($input)) {
-                $this->respond_error('Invalid JSON body', 400);
+            if (is_array($input)) {
+                return $this->sanitize_input($input);
             }
-            return $this->sanitize_input($input);
+
+            parse_str($raw, $formData);
+            if (!empty($formData)) {
+                return $this->sanitize_input($formData);
+            }
+
+            $this->respond_error('Invalid JSON body', 400);
         }
 
-        if ($_POST) {
+        if (!empty($_POST)) {
             return $this->sanitize_input($_POST);
         }
 
-        parse_str($this->read_raw_body(), $formData);
+        parse_str($raw, $formData);
         return $this->sanitize_input($formData ?? []);
     }
 

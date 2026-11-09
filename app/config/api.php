@@ -44,7 +44,7 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 | below (see their notes). The API library refuses to start otherwise.
 |
 */
-$config['api_helper_enabled'] = FALSE;
+$config['api_helper_enabled'] = TRUE;
 
 /*
 |--------------------------------------------------------------------------
@@ -107,6 +107,27 @@ $config['jwt_secret'] = getenv('JWT_SECRET') ?: '';
 |
 */
 $config['refresh_token_key'] = getenv('REFRESH_TOKEN_KEY') ?: '';
+
+/*
+|-----------------------------------------------------------------------
+| Email Verification (SMTP)
+|-----------------------------------------------------------------------
+|
+| SMTP credentials and sender address for email verification.
+|
+*/
+$config['smtp_host'] = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
+$config['smtp_port'] = (int) (getenv('SMTP_PORT') ?: 587);
+$config['smtp_encryption'] = strtolower(getenv('SMTP_ENCRYPTION') ?: 'starttls');
+$config['smtp_username'] = getenv('SMTP_USERNAME') ?: '';
+$config['smtp_password'] = getenv('SMTP_PASSWORD') ?: '';
+$config['email_from'] = getenv('EMAIL_FROM') ?: '';
+$config['email_from_name'] = getenv('EMAIL_FROM_NAME') ?: 'Baco360';
+$frontend_url = getenv('FRONTEND_URL');
+if (!$frontend_url && (getenv('APP_ENV') ?: 'development') === 'development') {
+	$frontend_url = 'http://localhost:5173';
+}
+$config['frontend_url'] = rtrim((string) $frontend_url, '/');
 
 /*
 |--------------------------------------------------------------------------
