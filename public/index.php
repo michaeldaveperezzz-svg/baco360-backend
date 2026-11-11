@@ -7,22 +7,18 @@ define('PREVENT_DIRECT_ACCESS', TRUE);
  * ------------------------------------------------------
  */
 
-$allowed_origins = [
-    'http://localhost:5173',
-    'https://baco360-frontend.vercel.app',
-    'https://baco360-frontend1.vercel.app',
-];
+$allowed_origins = 'http://localhost:5173';
 
 $frontend_url = getenv('FRONTEND_URL');
 if ($frontend_url !== false && trim($frontend_url) !== '') {
-    $allowed_origins[] = rtrim(trim($frontend_url), '/');
+    $allowed_origins = rtrim(trim($frontend_url), '/');
 }
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
 if (
     $request_origin !== '' &&
-    in_array($request_origin, $allowed_origins, true)
+    $request_origin === $allowed_origins
 ) {
     header("Access-Control-Allow-Origin: $request_origin");
     header("Access-Control-Allow-Credentials: true");
