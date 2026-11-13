@@ -51,6 +51,7 @@ class Create_password_reset_tokens_table
             ])
             ->add_key('id', primary: TRUE)
             ->add_key('user_id', unique: TRUE, name: 'user_id_unique')
+            ->add_key('token_hash', name: 'token_hash_idx')
             ->create_table('password_reset_tokens');
     }
 
