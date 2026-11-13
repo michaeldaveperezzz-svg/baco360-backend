@@ -28,13 +28,6 @@ class AuthController extends ApiBaseController
         if ((int) $user['is_active'] !== 1) {
             $this->api->respond_error('Account is inactive.', 403);
         }
-        if ($this->db->raw(
-            'SELECT id FROM email_verification_tokens WHERE user_id = ? LIMIT 1',
-            [$user['id']]
-        )->fetch(PDO::FETCH_ASSOC)) {
-            $this->api->respond_error('Verify your email address before signing in.', 403);
-        }
-
         $tokens = $this->api->issue_tokens(['id' => $user['id'], 'role' => $user['role']]);
         unset($user['password']);
         $user = $this->userWithSettings($user);
@@ -53,60 +46,24 @@ class AuthController extends ApiBaseController
         if ($name === '' || strlen($name) > 150 || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 150) {
             $this->api->respond_error('Enter a valid name and email address.', 422);
         }
-        if (!SmtpMailer::isConfigured()) {
-            $this->api->respond_error('Email verification is not configured. Configure the SMTP settings in baco360backend/.env.', 503);
-        }
         if (!is_string($password) || strlen($password) < 8 || $password !== ($input['password_confirmation'] ?? null)) {
             $this->api->respond_error('Passwords must match and contain at least 8 characters.', 422);
         }
         $existingUser = $this->db->raw(
-            'SELECT id, name, email_verified_at FROM users WHERE email = ? LIMIT 1',
+            'SELECT id FROM users WHERE email = ? LIMIT 1',
             [$email]
         )->fetch(PDO::FETCH_ASSOC);
-        if ($existingUser && $existingUser['email_verified_at'] !== null) {
+        if ($existingUser) {
             $this->api->respond_error('An account with this email already exists.', 409);
         }
 
-        if ($existingUser) {
-            $existingToken = $this->db->raw(
-                'SELECT sent_at, (sent_at > DATE_SUB(NOW(), INTERVAL 60 SECOND)) AS sent_recently
-                 FROM email_verification_tokens WHERE user_id = ? LIMIT 1',
-                [$existingUser['id']]
-            )->fetch(PDO::FETCH_ASSOC);
-            if ($existingToken && (int) $existingToken['sent_recently'] === 1) {
-                $this->respondSuccess(
-                    ['email' => $email, 'verification_required' => true],
-                    'A verification email was sent recently. Use the latest code in your inbox.'
-                );
-            }
-
-            $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-            if (!$this->db->transaction()) {
-                $this->api->respond_error('Could not start email verification. Please try again.', 500);
-            }
-            try {
-                $this->saveVerificationCode($existingUser['id'], $code);
-                SmtpMailer::sendVerificationCode($email, $existingUser['name'], $code);
-                $this->db->commit();
-            } catch (Exception $error) {
-                $this->db->roll_back();
-                error_log('Could not resend verification during registration: ' . $error->getMessage());
-                $this->api->respond_error('Could not send the verification email. Please try again.', 502);
-            }
-            $this->respondSuccess(
-                ['email' => $email, 'verification_required' => true],
-                'A new verification code has been sent to your email.'
-            );
-        }
-
-        $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
         if (!$this->db->transaction()) {
             $this->api->respond_error('Could not start account registration. Please try again.', 500);
         }
         try {
             $this->db->raw(
-                'INSERT INTO users (name, email, phone, password, role, is_active, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW())',
+                'INSERT INTO users (name, email, phone, password, role, is_active, email_verified_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW(), NOW())',
                 [$name, $email, $phone ?: null, password_hash($password, PASSWORD_DEFAULT), 'resident']
             );
             $user = $this->getUserByEmail($email);
@@ -115,230 +72,143 @@ class AuthController extends ApiBaseController
                  VALUES (?, ?, ?, 1, 1)',
                 [$user['id'], !empty($input['sms_enabled']) ? 1 : 0, !empty($input['email_enabled']) ? 1 : 0]
             );
-            $this->saveVerificationCode($user['id'], $code);
-            SmtpMailer::sendVerificationCode($email, $name, $code);
             $this->db->commit();
         } catch (Exception $error) {
             $this->db->roll_back();
-            error_log('Could not complete account registration and send verification email: ' . $error->getMessage());
-            $this->api->respond_error('Could not complete account registration and send its verification email. Please check the SMTP configuration and try again.', 502);
+            error_log('Could not complete account registration: ' . $error->getMessage());
+            $this->api->respond_error('Could not complete account registration. Please try again.', 500);
         }
         $this->respondSuccess(
-            ['email' => $email, 'verification_required' => true],
-            'Account created. Check your email for the verification code.',
+            ['email' => $email, 'verification_required' => false],
+            'Account created. You can now sign in.',
             201
         );
     }
 
-    public function verifyEmail()
+    public function googleSignIn()
     {
         $this->api->require_method('POST');
         $input = $this->api->body();
-        $email = strtolower(trim($input['email'] ?? ''));
-        $code = trim($input['code'] ?? '');
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || !preg_match('/^\d{6}$/', $code)) {
-            $this->api->respond_error('A valid email address and 6-digit code are required.', 422);
+        $idToken = $input['id_token'] ?? '';
+        $intent = $input['intent'] ?? '';
+        $clientId = trim((string) getenv('GOOGLE_CLIENT_ID'));
+
+        if (!is_string($idToken) || $idToken === '' || strlen($idToken) > 8192
+            || !in_array($intent, ['sign_in', 'sign_up'], true)) {
+            $this->api->respond_error('A Google credential and valid sign-in intent are required.', 422);
+        }
+        if ($clientId === '') {
+            $this->api->respond_error('Google sign-in is not configured.', 503);
         }
 
-        $verification = $this->db->raw(
-            'SELECT u.id, t.code_hash, t.attempts, (t.expires_at > NOW()) AS code_is_valid
-             FROM users u JOIN email_verification_tokens t ON t.user_id = u.id
-             WHERE u.email = ? LIMIT 1',
-            [$email]
-        )->fetch(PDO::FETCH_ASSOC);
-        if (!$verification || (int) $verification['code_is_valid'] !== 1) {
-            $this->api->respond_error('This verification code has expired or is no longer active. Request a new code.', 422);
-        }
-        if ((int) $verification['attempts'] >= 5) {
-            $this->api->respond_error('Too many incorrect codes. Request a new verification email.', 429);
-        }
-        if (!hash_equals($verification['code_hash'], hash('sha256', $code))) {
-            $this->db->raw(
-                'UPDATE email_verification_tokens SET attempts = attempts + 1 WHERE user_id = ?',
-                [$verification['id']]
-            );
-            $this->api->respond_error('That code does not match the latest verification email. Use the newest code or request another one.', 422);
+        $identity = $this->verifyGoogleIdToken($idToken, $clientId);
+        if (!$identity) {
+            $this->api->respond_error('The Google credential is invalid or expired. Please try again.', 401);
         }
 
-        $this->db->raw('UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = ?', [$verification['id']]);
-        $this->db->raw('DELETE FROM email_verification_tokens WHERE user_id = ?', [$verification['id']]);
-        $user = $this->getUser($verification['id']);
+        $email = strtolower(trim($identity['email']));
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 150) {
+            $this->api->respond_error('The Google account has an unsupported email address.', 422);
+        }
+
+        $user = $this->getUserByEmail($email);
+        if (!$user && $intent === 'sign_in') {
+            $this->api->respond_error('No Baco360 account is linked to this Google email. Create an account first.', 404);
+        }
+
+        if ($user) {
+            if ((int) $user['is_active'] !== 1) {
+                $this->api->respond_error('Account is inactive.', 403);
+            }
+            if (empty($user['email_verified_at'])) {
+                $this->db->raw(
+                    'UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = ?',
+                    [$user['id']]
+                );
+            }
+            $this->db->raw('DELETE FROM email_verification_tokens WHERE user_id = ?', [$user['id']]);
+            $user = $this->getUser($user['id']);
+        } else {
+            if (!$this->db->transaction()) {
+                $this->api->respond_error('Could not start Google account registration. Please try again.', 500);
+            }
+            try {
+                $name = trim((string) ($identity['name'] ?? ''));
+                if ($name === '') $name = strstr($email, '@', true) ?: 'Baco360 Resident';
+                $name = substr($name, 0, 150);
+                $this->db->raw(
+                    'INSERT INTO users (name, email, phone, password, role, is_active, email_verified_at, created_at, updated_at)
+                     VALUES (?, ?, NULL, ?, ?, 1, NOW(), NOW(), NOW())',
+                    [$name, $email, password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), 'resident']
+                );
+                $user = $this->getUserByEmail($email);
+                if (!$user) throw new RuntimeException('Google account was created but could not be loaded.');
+                $this->db->raw(
+                    'INSERT INTO notification_settings (user_id, sms_enabled, email_enabled, report_updates_enabled, resolution_updates_enabled)
+                     VALUES (?, 0, 1, 1, 1)',
+                    [$user['id']]
+                );
+                $this->db->commit();
+            } catch (Throwable $error) {
+                $this->db->roll_back();
+                $user = $this->getUserByEmail($email);
+                if (!$user) {
+                    error_log('Could not create Google account: ' . $error->getMessage());
+                    $this->api->respond_error('Could not create the Google account. Please try again.', 500);
+                }
+                if ((int) $user['is_active'] !== 1) {
+                    $this->api->respond_error('Account is inactive.', 403);
+                }
+                $this->db->raw(
+                    'UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = ?',
+                    [$user['id']]
+                );
+                $user = $this->getUser($user['id']);
+            }
+        }
+
         $tokens = $this->api->issue_tokens(['id' => $user['id'], 'role' => $user['role']]);
         $this->respondSuccess([
             'user' => $this->userWithSettings($user),
             'tokens' => $tokens,
-        ], 'Email verified and signed in.');
+        ], 'Google sign-in successful.');
     }
 
-    public function resendVerification()
+    private function verifyGoogleIdToken($idToken, $clientId)
     {
-        $this->api->require_method('POST');
-        $input = $this->api->body();
-        $email = strtolower(trim($input['email'] ?? ''));
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $this->api->respond_error('A valid email address is required.', 422);
-        }
-        if (!SmtpMailer::isConfigured()) {
-            $this->api->respond_error('Email verification is not configured. Configure the SMTP settings in baco360backend/.env.', 503);
-        }
-
-        $verification = $this->db->raw(
-            'SELECT u.id, u.name, t.sent_at,
-                    (t.sent_at > DATE_SUB(NOW(), INTERVAL 60 SECOND)) AS sent_recently
-             FROM users u JOIN email_verification_tokens t ON t.user_id = u.id
-             WHERE u.email = ? LIMIT 1',
-            [$email]
-        )->fetch(PDO::FETCH_ASSOC);
-        if ($verification && (int) $verification['sent_recently'] === 1) {
-            $this->api->respond_error('Please wait a minute before requesting another code.', 429);
-        }
-        if ($verification) {
-            $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-            if (!$this->db->transaction()) {
-                $this->api->respond_error('Could not start email verification. Please try again.', 500);
-            }
-            try {
-                $this->saveVerificationCode($verification['id'], $code);
-                SmtpMailer::sendVerificationCode($email, $verification['name'], $code);
-                $this->db->commit();
-            } catch (Exception $error) {
-                $this->db->roll_back();
-                error_log('Could not resend verification email: ' . $error->getMessage());
-                $this->api->respond_error('The verification email could not be sent. Please try again later.', 502);
-            }
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 8,
+                'ignore_errors' => true,
+                'header' => "Accept: application/json\r\n",
+            ],
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+            ],
+        ]);
+        $url = 'https://oauth2.googleapis.com/tokeninfo?id_token=' . rawurlencode($idToken);
+        $response = @file_get_contents($url, false, $context);
+        if ($response === false) {
+            error_log('Google token verification request failed.');
+            $this->api->respond_error('Google sign-in is temporarily unavailable. Please try again.', 503);
         }
 
-        $this->respondSuccess(null, 'If the account needs verification, a new code has been sent.');
-    }
-
-    public function forgotPassword()
-    {
-        $this->api->require_method('POST');
-        $input = $this->api->body();
-        $email = strtolower(trim($input['email'] ?? ''));
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $this->api->respond_error('Enter a valid email address.', 422);
-        }
-        if (!SmtpMailer::isConfigured()) {
-            $this->api->respond_error('Password reset email is not configured.', 503);
+        $identity = json_decode($response, true);
+        if (!is_array($identity)
+            || !in_array($identity['iss'] ?? '', ['accounts.google.com', 'https://accounts.google.com'], true)
+            || !hash_equals($clientId, (string) ($identity['aud'] ?? ''))
+            || (isset($identity['azp']) && !hash_equals($clientId, (string) $identity['azp']))
+            || (int) ($identity['exp'] ?? 0) <= time()
+            || !in_array($identity['email_verified'] ?? false, [true, 'true', 1, '1'], true)
+            || !is_string($identity['email'] ?? null)
+            || !is_string($identity['sub'] ?? null)
+            || $identity['sub'] === '') {
+            return null;
         }
 
-        $genericMessage = 'If a verified account matches that email, a password reset code has been sent.';
-        $user = $this->db->raw(
-            'SELECT id, name, email_verified_at, is_active FROM users WHERE email = ? LIMIT 1',
-            [$email]
-        )->fetch(PDO::FETCH_ASSOC);
-        if (!$user || !$user['email_verified_at'] || (int) $user['is_active'] !== 1) {
-            $this->respondSuccess(null, $genericMessage);
-        }
-
-        $existingToken = $this->db->raw(
-            'SELECT sent_at, (sent_at > DATE_SUB(NOW(), INTERVAL 60 SECOND)) AS sent_recently
-             FROM password_reset_tokens WHERE user_id = ? LIMIT 1',
-            [$user['id']]
-        )->fetch(PDO::FETCH_ASSOC);
-        if ($existingToken && (int) $existingToken['sent_recently'] === 1) {
-            $this->respondSuccess(null, $genericMessage);
-        }
-
-        $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-        if (!$this->db->transaction()) {
-            $this->api->respond_error('Could not start password reset. Please try again.', 500);
-        }
-        try {
-            $this->savePasswordResetCode($user['id'], $code);
-            SmtpMailer::sendPasswordResetCode($email, $user['name'], $code);
-            $this->db->commit();
-        } catch (Exception $error) {
-            $this->db->roll_back();
-            error_log('Could not send password reset code: ' . $error->getMessage());
-            $this->api->respond_error('Could not send the password reset email. Please try again.', 502);
-        }
-
-        $this->respondSuccess(null, $genericMessage);
-    }
-
-    public function resetPassword()
-    {
-        $this->api->require_method('POST');
-        $input = $this->api->body();
-        $email = strtolower(trim($input['email'] ?? ''));
-        $code = trim($input['code'] ?? '');
-        $password = $input['password'] ?? null;
-        $confirmation = $input['password_confirmation'] ?? null;
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || !preg_match('/^\d{6}$/', $code)) {
-            $this->api->respond_error('A valid email address and 6-digit code are required.', 422);
-        }
-        if (!is_string($password) || strlen($password) < 8 || $password !== $confirmation) {
-            $this->api->respond_error('Passwords must match and contain at least 8 characters.', 422);
-        }
-
-        $reset = $this->db->raw(
-            'SELECT u.id, t.code_hash, t.attempts, (t.expires_at > NOW()) AS code_is_valid
-             FROM users u JOIN password_reset_tokens t ON t.user_id = u.id
-             WHERE u.email = ? AND u.email_verified_at IS NOT NULL AND u.is_active = 1 LIMIT 1',
-            [$email]
-        )->fetch(PDO::FETCH_ASSOC);
-        if (!$reset || (int) $reset['code_is_valid'] !== 1) {
-            $this->api->respond_error('This reset code has expired or is no longer active. Request a new code.', 422);
-        }
-        if ((int) $reset['attempts'] >= 5) {
-            $this->api->respond_error('Too many incorrect codes. Request a new password reset code.', 429);
-        }
-        if (!hash_equals($reset['code_hash'], hash('sha256', $code))) {
-            $this->db->raw(
-                'UPDATE password_reset_tokens SET attempts = attempts + 1 WHERE user_id = ?',
-                [$reset['id']]
-            );
-            $this->api->respond_error('That code does not match. Check your email and try again.', 422);
-        }
-
-        if (!$this->db->transaction()) {
-            $this->api->respond_error('Could not reset the password. Please try again.', 500);
-        }
-        try {
-            $this->db->raw(
-                'UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?',
-                [password_hash($password, PASSWORD_DEFAULT), $reset['id']]
-            );
-            $this->db->raw('DELETE FROM password_reset_tokens WHERE user_id = ?', [$reset['id']]);
-            $this->db->raw('DELETE FROM refresh_tokens WHERE user_id = ?', [$reset['id']]);
-            $this->db->commit();
-        } catch (Exception $error) {
-            $this->db->roll_back();
-            error_log('Could not reset account password: ' . $error->getMessage());
-            $this->api->respond_error('Could not reset the password. Please try again.', 500);
-        }
-
-        $this->respondSuccess(null, 'Password reset successfully. Sign in with your new password.');
-    }
-
-    private function saveVerificationCode($userId, $code)
-    {
-        $this->db->raw(
-            'INSERT INTO email_verification_tokens (user_id, code_hash, expires_at, sent_at, attempts)
-             VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), NOW(), 0)
-             ON DUPLICATE KEY UPDATE
-                code_hash = VALUES(code_hash),
-                expires_at = VALUES(expires_at),
-                sent_at = NOW(),
-                attempts = 0',
-            [$userId, hash('sha256', $code)]
-        );
-    }
-
-    private function savePasswordResetCode($userId, $code)
-    {
-        $this->db->raw(
-            'INSERT INTO password_reset_tokens (user_id, code_hash, expires_at, sent_at, attempts)
-             VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), NOW(), 0)
-             ON DUPLICATE KEY UPDATE
-                code_hash = VALUES(code_hash),
-                expires_at = VALUES(expires_at),
-                sent_at = NOW(),
-                attempts = 0',
-            [$userId, hash('sha256', $code)]
-        );
+        return $identity;
     }
 
     public function me()
@@ -473,16 +343,7 @@ class AuthController extends ApiBaseController
         } catch (Throwable $error) {
             $this->db->roll_back();
             error_log('Could not send profile contact verification: ' . $error->getMessage());
-            $details = strtolower($error->getMessage());
-            if (str_contains($details, 'authentication')) {
-                $message = 'The email provider rejected SMTP login. Check the credentials and complete any required account verification. For Gmail, use an App Password with 2-Step Verification enabled.';
-            } elseif (str_contains($details, 'sender validation')
-                || str_contains($details, 'recipient validation')
-                || str_contains($details, 'resend rejected')) {
-                $message = 'The email provider rejected delivery. Verify the sender domain and confirm it is allowed to send to this address.';
-            } else {
-                $message = 'The verification email could not be sent. Check the email provider configuration and try again later.';
-            }
+            $message = 'The verification email could not be sent. Check the MAIL_* SMTP configuration and try again later.';
             $this->api->respond_error($message, 502);
         }
 

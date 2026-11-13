@@ -110,19 +110,17 @@ $config['refresh_token_key'] = getenv('REFRESH_TOKEN_KEY') ?: '';
 
 /*
 |-----------------------------------------------------------------------
-| Email Verification (SMTP)
+| SMTP email delivery
 |-----------------------------------------------------------------------
-|
-| SMTP credentials and sender address for email verification.
-|
 */
-$config['smtp_host'] = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
-$config['smtp_port'] = (int) (getenv('SMTP_PORT') ?: 587);
-$config['smtp_encryption'] = strtolower(getenv('SMTP_ENCRYPTION') ?: 'starttls');
-$config['smtp_username'] = getenv('SMTP_USERNAME') ?: '';
-$config['smtp_password'] = getenv('SMTP_PASSWORD') ?: '';
-$config['email_from'] = getenv('EMAIL_FROM') ?: '';
-$config['email_from_name'] = getenv('EMAIL_FROM_NAME') ?: 'Baco360';
+$config['mail_mailer'] = getenv('MAIL_MAILER') ?: 'smtp';
+$config['mail_host'] = getenv('MAIL_HOST') ?: '';
+$config['mail_port'] = (int) (getenv('MAIL_PORT') ?: 587);
+$config['mail_username'] = getenv('MAIL_USERNAME') ?: '';
+$config['mail_password'] = getenv('MAIL_PASSWORD') ?: '';
+$config['mail_encryption'] = strtolower((string) (getenv('MAIL_ENCRYPTION') ?: 'tls'));
+$config['mail_from_address'] = getenv('MAIL_FROM_ADDRESS') ?: '';
+$config['mail_from_name'] = getenv('MAIL_FROM_NAME') ?: 'Baco360';
 $frontend_url = getenv('FRONTEND_URL');
 if (!$frontend_url && (getenv('APP_ENV') ?: 'development') === 'development') {
 	$frontend_url = 'http://localhost:5173';
