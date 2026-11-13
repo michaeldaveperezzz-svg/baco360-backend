@@ -1,7 +1,6 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 require_once __DIR__ . '/ApiBaseController.php';
-require_once APP_DIR . 'libraries/NotificationEmailService.php';
 
 class ReportsController extends ApiBaseController
 {
@@ -89,14 +88,6 @@ class ReportsController extends ApiBaseController
             [$id, $actor['id'], 'submitted', 'Report submitted.']
         );
         $this->notifyRoles(['admin', 'staff'], $id, 'concern_submitted', $report['priority'], $actor['id']);
-        NotificationEmailService::queueReportSubmissionToAdmins(
-            $this->db,
-            (int) $id,
-            $reference,
-            $report,
-            $category['name'],
-            config_item('frontend_url')
-        );
         $this->audit('created', 'reports', $id, 'Submitted report ' . $reference);
         $row = $this->findReport($id);
         $this->respondSuccess([
@@ -177,23 +168,6 @@ class ReportsController extends ApiBaseController
                 'INSERT INTO report_status_histories (report_id, changed_by, old_status, new_status, notes, changed_at)
                  VALUES (?, ?, ?, ?, ?, NOW())',
                 [$id, $actor['id'], $row['status'], $input['status'], trim($input['notes'] ?? '')]
-            );
-            $historyId = (int) $this->db->raw('SELECT LAST_INSERT_ID()')->fetchColumn();
-            NotificationEmailService::queueStatusUpdateToResident(
-                $this->db,
-                (int) $id,
-                (int) $row['resident_id'],
-                $row['reference_number'],
-                $row,
-                $row['status'],
-                $input['status'],
-                $historyId,
-                $input['status'] === 'resolved'
-                    ? ($input['resolution_description'] ?? $row['resolution_description'] ?? '')
-                    : ($input['status'] === 'rejected'
-                        ? ($input['rejection_reason'] ?? $row['rejection_reason'] ?? '')
-                        : ''),
-                config_item('frontend_url')
             );
         }
         $notificationPriority = $input['priority'] ?? $row['priority'];
@@ -289,16 +263,6 @@ class ReportsController extends ApiBaseController
             $this->notifyRoles(['admin', 'staff'], $id, 'resident_message', $report['priority'], $actor['id']);
         } elseif (!$internal) {
             $this->notifyUser($report['resident_id'], $id, 'report_message', $report['priority']);
-            NotificationEmailService::queueProgressUpdateToResident(
-                $this->db,
-                (int) $id,
-                (int) $report['resident_id'],
-                $report['reference_number'],
-                $report,
-                $commentId,
-                $comment,
-                config_item('frontend_url')
-            );
         }
         $this->audit('commented', 'reports', $id, 'Added a report update.');
         $this->respondSuccess($this->reportDetails($report), 'Comment added.', 201);
@@ -462,13 +426,6 @@ class ReportsController extends ApiBaseController
         )->fetch(PDO::FETCH_ASSOC);
         if (!$staff) $this->api->respond_error('The selected staff account is not active.', 422);
 
-        $previousAssignment = $this->db->raw(
-            'SELECT a.staff_id, u.name AS staff_name
-             FROM report_assignments a JOIN users u ON u.id = a.staff_id
-             WHERE a.report_id = ? AND a.unassigned_at IS NULL
-             ORDER BY a.id DESC LIMIT 1',
-            [$id]
-        )->fetch(PDO::FETCH_ASSOC);
         $this->db->raw(
             'UPDATE report_assignments SET unassigned_at = NOW(), updated_at = NOW()
              WHERE report_id = ? AND unassigned_at IS NULL',
@@ -479,31 +436,8 @@ class ReportsController extends ApiBaseController
              VALUES (?, ?, ?, ?, NOW(), ?, NOW(), NOW())',
             [$id, $staffId, $actor['id'], trim($input['department'] ?? '') ?: null, trim($input['assignment_notes'] ?? '') ?: null]
         );
-        $assignmentId = (int) $this->db->raw('SELECT LAST_INSERT_ID()')->fetchColumn();
         $this->notifyUser($staffId, $id, 'report_assigned', $report['priority']);
         $this->notifyUser($report['resident_id'], $id, 'report_assigned', $report['priority']);
-        NotificationEmailService::queueAssignmentToStaff(
-            $this->db,
-            (int) $id,
-            (int) $staffId,
-            $assignmentId,
-            $report['reference_number'],
-            $report,
-            config_item('frontend_url')
-        );
-        if ($previousAssignment && (int) $previousAssignment['staff_id'] !== (int) $staffId) {
-            NotificationEmailService::queueReassignmentToResident(
-                $this->db,
-                (int) $id,
-                (int) $report['resident_id'],
-                $assignmentId,
-                $report['reference_number'],
-                $report,
-                $previousAssignment['staff_name'],
-                $staff['name'],
-                config_item('frontend_url')
-            );
-        }
         if ($report['status'] === 'submitted' || $report['status'] === 'under_review') {
             $this->db->raw('UPDATE reports SET status = ?, updated_at = NOW() WHERE id = ?', ['assigned', $id]);
             $this->db->raw(

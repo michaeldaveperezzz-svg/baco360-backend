@@ -70,7 +70,11 @@ class AuthController extends ApiBaseController
             $this->db->raw(
                 'INSERT INTO notification_settings (user_id, sms_enabled, email_enabled, report_updates_enabled, resolution_updates_enabled)
                  VALUES (?, ?, ?, 1, 1)',
-                [$user['id'], !empty($input['sms_enabled']) ? 1 : 0, !empty($input['email_enabled']) ? 1 : 0]
+                [
+                    $user['id'],
+                    !array_key_exists('sms_enabled', $input) || !empty($input['sms_enabled']) ? 1 : 0,
+                    !array_key_exists('email_enabled', $input) || !empty($input['email_enabled']) ? 1 : 0,
+                ]
             );
             $this->db->commit();
         } catch (Exception $error) {

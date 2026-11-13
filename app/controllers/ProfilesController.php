@@ -1,7 +1,6 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 require_once __DIR__ . '/ApiBaseController.php';
-require_once APP_DIR . 'libraries/NotificationEmailService.php';
 
 class ProfilesController extends ApiBaseController
 {
@@ -168,14 +167,6 @@ class ProfilesController extends ApiBaseController
                 'INSERT INTO user_notifications (recipient_id, report_id, actor_id, event_type, priority, created_at)
                  VALUES (?, NULL, ?, ?, ?, NOW())',
                 [$profile['user_id'], $actor['id'], $eventType, 'medium']
-            );
-            NotificationEmailService::queueAddressVerificationToResident(
-                $this->db,
-                (int) $profile['id'],
-                (int) $profile['user_id'],
-                $status,
-                (string) $actor['name'],
-                config_item('frontend_url')
             );
         }
 

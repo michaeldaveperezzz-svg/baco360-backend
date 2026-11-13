@@ -107,7 +107,6 @@ $router->get('/', 'Welcome::index');
     $router->put('api/admin/users/{id}', 'UsersController::update');
     $router->delete('api/admin/users/{id}', 'UsersController::destroy');
     $router->get('api/admin/audit-logs', 'AdminController::auditLogs');
-    $router->get('api/admin/email-deliveries', 'AdminController::emailDeliveries');
     $router->get('api/dashboard/stats', 'AdminController::dashboardStats');
 
     // Public website content and administrator content management

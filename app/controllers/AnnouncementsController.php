@@ -1,7 +1,6 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 require_once __DIR__ . '/ApiBaseController.php';
-require_once APP_DIR . 'libraries/NotificationEmailService.php';
 
 class AnnouncementsController extends ApiBaseController
 {
@@ -288,17 +287,6 @@ class AnnouncementsController extends ApiBaseController
         } catch (Throwable $error) {
             $auditWarning = true;
             error_log('Announcement ' . $announcementId . ' was prepared but its audit record could not be saved: ' . $error->getMessage());
-        }
-
-        foreach ($recipients as $recipient) {
-            NotificationEmailService::queueAnnouncementToUser(
-                $this->db,
-                $announcementId,
-                (int) $recipient['id'],
-                $title,
-                $message,
-                config_item('frontend_url')
-            );
         }
 
         $this->respondSuccess([
