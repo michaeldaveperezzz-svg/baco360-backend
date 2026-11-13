@@ -4,6 +4,7 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 abstract class ApiBaseController extends Controller
 {
     protected $actor;
+    protected $sessionId;
 
     public function __construct()
     {
@@ -15,16 +16,33 @@ abstract class ApiBaseController extends Controller
     protected function authenticate()
     {
         $token = $this->api->require_jwt();
+        $this->sessionId = $token['session_id'] ?? null;
         $stmt = $this->db->raw(
-            'SELECT id, name, email, phone, role, is_active, email_verified_at, profile_photo, created_at
+            'SELECT id, name, email, phone, role, is_active, auth_version, email_verified_at, profile_photo, created_at
              FROM users WHERE id = ? LIMIT 1',
             [$token['sub']]
         );
         $this->actor = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        if (!$this->actor || (int) $this->actor['is_active'] !== 1) {
+        if (!$this->actor || (int) $this->actor['is_active'] !== 1
+            || (int) ($token['auth_version'] ?? 0) !== (int) $this->actor['auth_version']) {
             $this->api->respond_error('Unauthorized', 401);
         }
+        if ($this->sessionId !== null) {
+            if (!is_string($this->sessionId) || preg_match('/\A[a-f0-9]{32}\z/', $this->sessionId) !== 1) {
+                $this->api->respond_error('Unauthorized', 401);
+            }
+            $sessionExists = $this->db->raw(
+                'SELECT 1 FROM refresh_tokens
+                 WHERE user_id = ? AND session_id = ? AND expires_at > NOW()
+                 LIMIT 1',
+                [$this->actor['id'], $this->sessionId]
+            )->fetchColumn();
+            if ($sessionExists === false) {
+                $this->api->respond_error('Unauthorized', 401);
+            }
+        }
+        unset($this->actor['auth_version']);
 
         $settings = $this->db->raw(
             'SELECT sms_enabled, email_enabled, report_updates_enabled, resolution_updates_enabled

@@ -63,8 +63,8 @@ class UsersController extends ApiBaseController
         }
 
         $this->db->raw(
-            'INSERT INTO users (name, email, phone, password, role, is_active, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW())',
+            'INSERT INTO users (name, email, phone, password, password_is_set, role, is_active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 1, ?, 1, NOW(), NOW())',
             [$name, $email, $phone ?: null, password_hash($password, PASSWORD_DEFAULT), $role]
         );
         $id = $this->db->raw('SELECT LAST_INSERT_ID()')->fetchColumn();
@@ -123,6 +123,10 @@ class UsersController extends ApiBaseController
             }
             $fields[] = 'is_active = ?';
             $values[] = $active;
+            if (!$active && (int) $user['is_active'] === 1) {
+                $fields[] = 'auth_version = auth_version + 1';
+                $this->db->raw('DELETE FROM refresh_tokens WHERE user_id = ?', [$id]);
+            }
         }
         if (array_key_exists('password', $input) && $input['password'] !== '') {
             if (!is_string($input['password']) || strlen($input['password']) < 8) {
@@ -130,6 +134,7 @@ class UsersController extends ApiBaseController
             }
             $fields[] = 'password = ?';
             $values[] = password_hash($input['password'], PASSWORD_DEFAULT);
+            $fields[] = 'password_is_set = 1';
         }
         if (!$fields) $this->api->respond_error('No user changes were provided.', 422);
 

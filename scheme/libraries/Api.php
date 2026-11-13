@@ -613,18 +613,32 @@ class Api
         $user_id = $user_data['id'];
         $now     = time();
         $scopes  = $user_data['scopes'] ?? ['read'];
+        $session_id = $user_data['session_id'] ?? bin2hex(random_bytes(16));
+        if (!is_string($session_id) || preg_match('/\A[a-f0-9]{32}\z/', $session_id) !== 1) {
+            throw new InvalidArgumentException('A valid session identifier is required.');
+        }
+        $session_created_at = $user_data['session_created_at'] ?? null;
+        $session_ip_address = array_key_exists('session_ip_address', $user_data)
+            ? $user_data['session_ip_address']
+            : ($_SERVER['REMOTE_ADDR'] ?? null);
+        $session_user_agent = array_key_exists('session_user_agent', $user_data)
+            ? $user_data['session_user_agent']
+            : substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 1000);
 
         $access_payload = [
             'sub'    => $user_id,
             'type'   => 'access',
             'role'   => $user_data['role'] ?? 'user',
             'scopes' => $scopes,
+            'auth_version' => (int) ($user_data['auth_version'] ?? 0),
+            'session_id' => $session_id,
         ];
 
         $refresh_payload = [
             'sub'  => $user_id,
             'type' => 'refresh',
             'jti'  => bin2hex(random_bytes(16)),
+            'session_id' => $session_id,
         ];
 
         $access_token = $this->encode_jwt($access_payload);
@@ -638,9 +652,19 @@ class Api
         $expires_at = date('Y-m-d H:i:s', $now + $this->refresh_token_expiration);
 
         $this->_lava->db->raw(
-            "INSERT INTO {$this->refresh_token_table} (user_id, token, expires_at, jti) 
-            VALUES (?, ?, ?, ?)",
-            [$user_id, $hashed_refresh, $expires_at, $refresh_payload['jti']]
+            "INSERT INTO {$this->refresh_token_table}
+                (user_id, token, expires_at, jti, session_id, created_at, ip_address, user_agent)
+             VALUES (?, ?, ?, ?, ?, COALESCE(?, NOW()), ?, ?)",
+            [
+                $user_id,
+                $hashed_refresh,
+                $expires_at,
+                $refresh_payload['jti'],
+                $session_id,
+                $session_created_at,
+                $session_ip_address,
+                $session_user_agent,
+            ]
         );
 
         return [
@@ -679,13 +703,13 @@ class Api
         }
 
         $user_stmt = $this->_lava->db->raw(
-            "SELECT id, role FROM {$this->users_table} WHERE id = ? LIMIT 1",
+            "SELECT id, role, is_active, auth_version FROM {$this->users_table} WHERE id = ? LIMIT 1",
             [$payload['sub']]
         );
         $user = $user_stmt->fetch(PDO::FETCH_ASSOC);
 
-        if (!$user) {
-            $this->respond_error('User not found', 403);
+        if (!$user || (int) $user['is_active'] !== 1) {
+            $this->respond_error('Unauthorized', 403);
         }
 
         $this->revoke_refresh_token($refresh_token);
@@ -694,6 +718,11 @@ class Api
             'id'     => $user['id'],
             'role'   => $user['role'],
             'scopes' => $this->scopes_for_role($user['role']),
+            'auth_version' => (int) $user['auth_version'],
+            'session_id' => $found['session_id'] ?? ($payload['session_id'] ?? $payload['jti']),
+            'session_created_at' => $found['created_at'] ?? null,
+            'session_ip_address' => $found['ip_address'] ?? ($_SERVER['REMOTE_ADDR'] ?? null),
+            'session_user_agent' => $found['user_agent'] ?? substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 1000),
         ]);
 
         $this->respond([

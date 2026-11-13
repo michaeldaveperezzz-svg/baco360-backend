@@ -402,7 +402,7 @@ $config['security_headers'] = [
         'allowed_origins' => [],
         'credentials'     => false,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'headers'         => 'Authorization, Content-Type, X-Requested-With',
+        'headers'         => 'Authorization, Content-Type, X-Requested-With, X-Refresh-Token',
         'max_age'         => 600,
     ],
 

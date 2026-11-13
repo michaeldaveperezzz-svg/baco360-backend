@@ -67,6 +67,67 @@ class CommunityReportsController extends ApiBaseController
         ]);
     }
 
+    public function viewPost($id)
+    {
+        $actor = $this->authenticate();
+        if (!in_array($actor['role'], ['admin', 'staff'], true)) {
+            $this->api->respond_error('Staff or admin access is required.', 403);
+        }
+        $reportId = $this->requireResolvedReport($id);
+        if ($actor['role'] === 'staff' && !$this->db->raw(
+            'SELECT 1 FROM report_assignments
+             WHERE report_id = ? AND staff_id = ? AND unassigned_at IS NULL
+             LIMIT 1',
+            [$reportId, $actor['id']]
+        )->fetchColumn()) {
+            $this->api->respond_error('Resolved report not found.', 404);
+        }
+
+        $post = $this->db->raw(
+            'SELECT r.id, r.reference_number, r.category_id, c.name AS category_name, r.title,
+                    r.description, r.status, r.priority, r.location_address, r.submitted_at,
+                    r.resolved_at, r.resolution_description,
+                    (SELECT COUNT(*) FROM community_report_reactions cr WHERE cr.report_id = r.id) AS heart_count,
+                    (SELECT COUNT(*) FROM community_report_comments cc WHERE cc.report_id = r.id) AS comment_count
+             FROM reports r
+             JOIN issue_categories c ON c.id = r.category_id
+             WHERE r.id = ? AND r.status = ?
+             LIMIT 1',
+            [$reportId, 'resolved']
+        )->fetch(PDO::FETCH_ASSOC);
+        if (!$post) $this->api->respond_error('Resolved report not found.', 404);
+
+        $post['id'] = (int) $post['id'];
+        $post['category_id'] = (int) $post['category_id'];
+        $post['heart_count'] = (int) $post['heart_count'];
+        $post['comment_count'] = (int) $post['comment_count'];
+        $post['attachments'] = $this->db->raw(
+            'SELECT id, original_name, mime_type, file_size, attachment_type
+             FROM report_attachments WHERE report_id = ? ORDER BY id',
+            [$reportId]
+        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($post['attachments'] as &$attachment) {
+            $attachment['id'] = (int) $attachment['id'];
+            $attachment['file_size'] = (int) $attachment['file_size'];
+        }
+        unset($attachment);
+
+        $post['comments'] = $this->db->raw(
+            'SELECT id, comment, created_at
+             FROM community_report_comments WHERE report_id = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 100',
+            [$reportId]
+        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($post['comments'] as &$comment) {
+            $comment['id'] = (int) $comment['id'];
+            $comment['author'] = 'Resident';
+        }
+        unset($comment);
+
+        $this->respondSuccess($post);
+    }
+
     public function comments($id)
     {
         $this->requireResident();

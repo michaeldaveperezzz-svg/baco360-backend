@@ -192,7 +192,6 @@ class WebsiteContentController extends ApiBaseController
         if (!$fields) {
             $this->api->respond_error('No website settings changes were provided.', 422);
         }
-
         $currentSettings = $this->getSettings();
         $maintenanceStartsAt = array_key_exists('maintenance_starts_at', $fields)
             ? $fields['maintenance_starts_at']
@@ -346,7 +345,7 @@ class WebsiteContentController extends ApiBaseController
         $settings = $this->db->raw(
             'SELECT site_name, logo_path, primary_color, hero_title, hero_description, hero_image_path,
                     maintenance_enabled, maintenance_message, maintenance_starts_at, maintenance_ends_at,
-                    about_title, about_content, contact_email, contact_phone, contact_address,
+                   about_title, about_content, contact_email, contact_phone, contact_address,
                     footer_text, copyright_text, updated_at
              FROM website_content_settings WHERE id = 1 LIMIT 1'
         )->fetch(PDO::FETCH_ASSOC);

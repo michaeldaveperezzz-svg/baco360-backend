@@ -17,7 +17,7 @@ class AuthController extends ApiBaseController
         }
 
         $user = $this->db->raw(
-            'SELECT id, name, email, phone, password, role, is_active, email_verified_at, profile_photo, created_at
+            'SELECT id, name, email, phone, password, password_is_set, role, is_active, auth_version, email_verified_at, profile_photo, created_at
              FROM users WHERE email = ? LIMIT 1',
             [$email]
         )->fetch(PDO::FETCH_ASSOC);
@@ -26,10 +26,40 @@ class AuthController extends ApiBaseController
             $this->api->respond_error('Invalid email or password.', 401);
         }
         if ((int) $user['is_active'] !== 1) {
-            $this->api->respond_error('Account is inactive.', 403);
+            if ($user['role'] !== 'resident') {
+                $this->api->respond_error('Account is inactive.', 403);
+            }
+            if (!filter_var($input['reactivate'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+                $this->api->respond_error('This account is deactivated. Confirm reactivation to continue.', 403);
+            }
+            if (!$this->db->transaction()) {
+                $this->api->respond_error('Could not reactivate the account. Please try again.', 500);
+            }
+            try {
+                $this->db->raw('UPDATE users SET is_active = 1, updated_at = NOW() WHERE id = ?', [$user['id']]);
+                $this->actor = $user;
+                $this->audit('reactivated', 'users', $user['id'], 'Resident reactivated their account.');
+                $this->db->commit();
+            } catch (Throwable $error) {
+                $this->db->roll_back();
+                throw $error;
+            }
+            $user['is_active'] = 1;
         }
-        $tokens = $this->api->issue_tokens(['id' => $user['id'], 'role' => $user['role']]);
-        unset($user['password']);
+        if ((int) $user['password_is_set'] !== 1) {
+            $this->db->raw(
+                'UPDATE users SET password_is_set = 1 WHERE id = ?',
+                [$user['id']]
+            );
+        }
+        $tokens = $this->api->issue_tokens([
+            'id' => $user['id'],
+            'role' => $user['role'],
+            'auth_version' => (int) $user['auth_version'],
+        ]);
+        $this->actor = $user;
+        $this->audit('login', 'auth', $user['id'], 'Signed in with email and password.');
+        unset($user['password'], $user['password_is_set']);
         $user = $this->userWithSettings($user);
         $this->respondSuccess(['user' => $user, 'tokens' => $tokens], 'Login successful');
     }
@@ -62,8 +92,8 @@ class AuthController extends ApiBaseController
         }
         try {
             $this->db->raw(
-                'INSERT INTO users (name, email, phone, password, role, is_active, email_verified_at, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW(), NOW())',
+                'INSERT INTO users (name, email, phone, password, password_is_set, role, is_active, email_verified_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, 1, ?, 1, NOW(), NOW(), NOW())',
                 [$name, $email, $phone ?: null, password_hash($password, PASSWORD_DEFAULT), 'resident']
             );
             $user = $this->getUserByEmail($email);
@@ -98,7 +128,7 @@ class AuthController extends ApiBaseController
         $clientId = trim((string) getenv('GOOGLE_CLIENT_ID'));
 
         if (!is_string($idToken) || $idToken === '' || strlen($idToken) > 8192
-            || !in_array($intent, ['sign_in', 'sign_up'], true)) {
+            || !in_array($intent, ['sign_in', 'sign_up', 'reactivate'], true)) {
             $this->api->respond_error('A Google credential and valid sign-in intent are required.', 422);
         }
         if ($clientId === '') {
@@ -116,14 +146,36 @@ class AuthController extends ApiBaseController
         }
 
         $user = $this->getUserByEmail($email);
-        if (!$user && $intent === 'sign_in') {
+        if (!$user && in_array($intent, ['sign_in', 'reactivate'], true)) {
             $this->api->respond_error('No Baco360 account is linked to this Google email. Create an account first.', 404);
         }
 
         if ($user) {
             if ((int) $user['is_active'] !== 1) {
-                $this->api->respond_error('Account is inactive.', 403);
+                if ($user['role'] !== 'resident') {
+                    $this->api->respond_error('Account is inactive.', 403);
+                }
+                if ($intent !== 'reactivate') {
+                    $this->api->respond_error('This account is deactivated. Confirm reactivation to continue.', 403);
+                }
+                if (!$this->db->transaction()) {
+                    $this->api->respond_error('Could not reactivate the account. Please try again.', 500);
+                }
+                try {
+                    $this->db->raw('UPDATE users SET is_active = 1, updated_at = NOW() WHERE id = ?', [$user['id']]);
+                    $this->actor = $user;
+                    $this->audit('reactivated', 'users', $user['id'], 'Resident reactivated their account with Google.');
+                    $this->db->commit();
+                } catch (Throwable $error) {
+                    $this->db->roll_back();
+                    throw $error;
+                }
+                $user['is_active'] = 1;
             }
+            $this->db->raw(
+                'UPDATE users SET password_is_set = COALESCE(password_is_set, 0) WHERE id = ?',
+                [$user['id']]
+            );
             if (empty($user['email_verified_at'])) {
                 $this->db->raw(
                     'UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = ?',
@@ -141,8 +193,8 @@ class AuthController extends ApiBaseController
                 if ($name === '') $name = strstr($email, '@', true) ?: 'Baco360 Resident';
                 $name = substr($name, 0, 150);
                 $this->db->raw(
-                    'INSERT INTO users (name, email, phone, password, role, is_active, email_verified_at, created_at, updated_at)
-                     VALUES (?, ?, NULL, ?, ?, 1, NOW(), NOW(), NOW())',
+                    'INSERT INTO users (name, email, phone, password, password_is_set, role, is_active, email_verified_at, created_at, updated_at)
+                     VALUES (?, ?, NULL, ?, 0, ?, 1, NOW(), NOW(), NOW())',
                     [$name, $email, password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), 'resident']
                 );
                 $user = $this->getUserByEmail($email);
@@ -164,14 +216,24 @@ class AuthController extends ApiBaseController
                     $this->api->respond_error('Account is inactive.', 403);
                 }
                 $this->db->raw(
-                    'UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = ?',
+                    'UPDATE users SET password_is_set = COALESCE(password_is_set, 0), email_verified_at = NOW(), updated_at = NOW() WHERE id = ?',
                     [$user['id']]
                 );
                 $user = $this->getUser($user['id']);
             }
         }
 
-        $tokens = $this->api->issue_tokens(['id' => $user['id'], 'role' => $user['role']]);
+        $authVersion = $this->db->raw(
+            'SELECT auth_version FROM users WHERE id = ? LIMIT 1',
+            [$user['id']]
+        )->fetchColumn();
+        $tokens = $this->api->issue_tokens([
+            'id' => $user['id'],
+            'role' => $user['role'],
+            'auth_version' => (int) $authVersion,
+        ]);
+        $this->actor = $user;
+        $this->audit('login', 'auth', $user['id'], 'Signed in with Google.');
         $this->respondSuccess([
             'user' => $this->userWithSettings($user),
             'tokens' => $tokens,
@@ -218,6 +280,79 @@ class AuthController extends ApiBaseController
     public function me()
     {
         $this->respondSuccess($this->userWithSettings($this->authenticate()));
+    }
+
+    public function loginHistory()
+    {
+        $this->api->require_method('GET');
+        $actor = $this->authenticate();
+        $logs = $this->db->raw(
+            'SELECT id, description, ip_address, user_agent, created_at
+             FROM audit_logs
+             WHERE user_id = ? AND action = ? AND entity_type = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 50',
+            [$actor['id'], 'login', 'auth']
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->respondSuccess(['logs' => $logs]);
+    }
+
+    public function activeSessions()
+    {
+        $this->api->require_method('GET');
+        $actor = $this->authenticate();
+        $currentSessionId = $this->sessionId;
+
+        if (!$currentSessionId) {
+            $refreshToken = $_SERVER['HTTP_X_REFRESH_TOKEN'] ?? '';
+            $refreshPayload = is_string($refreshToken) && $refreshToken !== ''
+                ? $this->api->validate_jwt($refreshToken, 'refresh')
+                : null;
+            if ($refreshPayload && (int) ($refreshPayload['sub'] ?? 0) === (int) $actor['id'] && !empty($refreshPayload['jti'])) {
+                $currentSessionId = $this->db->raw(
+                    'SELECT session_id FROM refresh_tokens
+                     WHERE user_id = ? AND jti = ? AND expires_at > NOW()
+                     LIMIT 1',
+                    [$actor['id'], $refreshPayload['jti']]
+                )->fetchColumn();
+                if ($currentSessionId === false) $currentSessionId = null;
+            }
+        }
+
+        $sessions = $this->db->raw(
+            'SELECT session_id, created_at, expires_at, ip_address, user_agent
+             FROM refresh_tokens
+             WHERE user_id = ? AND expires_at > NOW()
+             ORDER BY COALESCE(created_at, expires_at) DESC',
+            [$actor['id']]
+        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($sessions as &$session) {
+            $session['is_current'] = is_string($currentSessionId)
+                && hash_equals($currentSessionId, (string) $session['session_id']);
+        }
+        unset($session);
+
+        $this->respondSuccess(['sessions' => $sessions]);
+    }
+
+    public function revokeSession($sessionId)
+    {
+        $this->api->require_method('DELETE');
+        $actor = $this->authenticate();
+        if (!is_string($sessionId) || preg_match('/\A[a-f0-9]{32}\z/', $sessionId) !== 1) {
+            $this->api->respond_error('Invalid session identifier.', 422);
+        }
+
+        $deleted = $this->db->raw(
+            'DELETE FROM refresh_tokens WHERE user_id = ? AND session_id = ?',
+            [$actor['id'], $sessionId]
+        );
+        if ($deleted->rowCount() === 0) {
+            $this->api->respond_error('Active session not found.', 404);
+        }
+
+        $this->respondSuccess(null, 'Session revoked.');
     }
 
     public function updateProfile()
@@ -287,17 +422,42 @@ class AuthController extends ApiBaseController
         if (!$emailChanged && !$phoneChanged) {
             $this->api->respond_error('No contact details have changed.', 422);
         }
-        if (empty($user['email_verified_at'])) {
-            $this->api->respond_error('Verify your current email before changing contact details.', 403);
-        }
-        if (!SmtpMailer::isConfigured()) {
-            $this->api->respond_error('Email verification is not configured. Contact details cannot be changed yet.', 503);
-        }
         if ($emailChanged && $this->db->raw(
             'SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1',
             [$email, $actor['id']]
         )->fetch(PDO::FETCH_ASSOC)) {
             $this->api->respond_error('That email address is already in use.', 409);
+        }
+
+        if (!$phoneChanged) {
+            if (!$this->db->transaction()) {
+                $this->api->respond_error('Could not update your email. Please try again.', 500);
+            }
+            try {
+                $this->db->raw('UPDATE users SET email = ?, updated_at = NOW() WHERE id = ?', [$email, $actor['id']]);
+                $this->db->raw('DELETE FROM user_contact_change_tokens WHERE user_id = ?', [$actor['id']]);
+                $this->db->commit();
+            } catch (PDOException $error) {
+                $this->db->roll_back();
+                if ($error->getCode() === '23000') $this->api->respond_error('That email address is already in use.', 409);
+                throw $error;
+            } catch (Throwable $error) {
+                $this->db->roll_back();
+                throw $error;
+            }
+
+            $this->respondSuccess([
+                'email_verification_required' => false,
+                'phone_verification_required' => false,
+                'user' => $this->userWithSettings($this->getUser($actor['id'])),
+            ], 'Email updated successfully.');
+        }
+
+        if (empty($user['email_verified_at'])) {
+            $this->api->respond_error('Verify your current email before changing your phone number.', 403);
+        }
+        if (!SmtpMailer::isConfigured()) {
+            $this->api->respond_error('Email verification is not configured. Phone numbers cannot be changed yet.', 503);
         }
 
         $existingRequest = $this->db->raw(
@@ -310,11 +470,13 @@ class AuthController extends ApiBaseController
         }
 
         $accountCode = $phoneChanged ? str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT) : null;
-        $emailCode = $emailChanged ? str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT) : null;
         if (!$this->db->transaction()) {
             $this->api->respond_error('Could not start contact verification. Please try again.', 500);
         }
         try {
+            if ($emailChanged) {
+                $this->db->raw('UPDATE users SET email = ?, updated_at = NOW() WHERE id = ?', [$email, $actor['id']]);
+            }
             $this->db->raw(
                 'INSERT INTO user_contact_change_tokens
                     (user_id, pending_email, pending_phone, phone_change_requested, account_code_hash, email_code_hash, expires_at, sent_at, attempts)
@@ -330,31 +492,33 @@ class AuthController extends ApiBaseController
                     attempts = 0',
                 [
                     $actor['id'],
-                    $emailChanged ? $email : null,
+                    null,
                     $phoneChanged ? $phone : null,
-                    $phoneChanged ? 1 : 0,
-                    hash('sha256', $accountCode ?? str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT)),
-                    $emailCode !== null ? hash('sha256', $emailCode) : null,
+                    1,
+                    hash('sha256', $accountCode),
+                    null,
                 ]
             );
-            if ($accountCode !== null) {
-                SmtpMailer::sendAccountChangeCode($user['email'], $user['name'], $accountCode, 'account');
-            }
-            if ($emailCode !== null) {
-                SmtpMailer::sendAccountChangeCode($email, $user['name'], $emailCode, 'email');
-            }
+            SmtpMailer::sendAccountChangeCode($user['email'], $user['name'], $accountCode, 'account');
             $this->db->commit();
+        } catch (PDOException $error) {
+            $this->db->roll_back();
+            if ($error->getCode() === '23000') $this->api->respond_error('That email address is already in use.', 409);
+            error_log('Could not send profile contact verification: ' . $error->getMessage());
+            $this->api->respond_error('The verification email could not be sent. Check the MAIL_* SMTP configuration and try again later.', 502);
         } catch (Throwable $error) {
             $this->db->roll_back();
             error_log('Could not send profile contact verification: ' . $error->getMessage());
-            $message = 'The verification email could not be sent. Check the MAIL_* SMTP configuration and try again later.';
-            $this->api->respond_error($message, 502);
+            $this->api->respond_error('The verification email could not be sent. Check the MAIL_* SMTP configuration and try again later.', 502);
         }
 
         $this->respondSuccess([
-            'email_verification_required' => $emailChanged,
+            'email_verification_required' => false,
             'phone_verification_required' => $phoneChanged,
-        ], 'Verification code sent. Enter each code to confirm your contact changes.');
+            'user' => $this->userWithSettings($this->getUser($actor['id'])),
+        ], $emailChanged
+            ? 'Email updated. A code was sent to your previous email to verify the phone change.'
+            : 'A verification code was sent to your current email.');
     }
 
     public function verifyContactChange()
@@ -439,23 +603,164 @@ class AuthController extends ApiBaseController
         $this->api->require_method('PUT');
         $actor = $this->authenticate();
         $input = $this->api->body();
-        $currentPassword = $input['current_password'] ?? null;
+        $currentPassword = $input['current_password'] ?? '';
         $password = $input['password'] ?? null;
         $confirmation = $input['password_confirmation'] ?? null;
-        if (!is_string($currentPassword) || $currentPassword === '' || !is_string($password) || strlen($password) < 8 || $password !== $confirmation) {
-            $this->api->respond_error('Provide your current password and a matching new password of at least 8 characters.', 422);
+        if (!is_string($currentPassword) || !is_string($password) || strlen($password) < 8 || $password !== $confirmation) {
+            $this->api->respond_error('Provide a matching new password of at least 8 characters.', 422);
         }
 
-        $user = $this->db->raw('SELECT password FROM users WHERE id = ?', [$actor['id']])->fetch(PDO::FETCH_ASSOC);
-        if (!$user || !password_verify($currentPassword, $user['password'])) {
-            $this->api->respond_error('Your current password is incorrect.', 422);
+        $user = $this->db->raw(
+            'SELECT password, password_is_set FROM users WHERE id = ?',
+            [$actor['id']]
+        )->fetch(PDO::FETCH_ASSOC);
+        if (!$user) {
+            $this->api->respond_error('Account not found.', 404);
+        }
+        $hasLocalPassword = $user['password_is_set'] === null || (int) $user['password_is_set'] !== 0;
+        if ($hasLocalPassword && ($currentPassword === '' || !password_verify($currentPassword, $user['password']))) {
+            $this->api->respond_error('Your current password is required and must be correct.', 422);
         }
 
         $this->db->raw(
-            'UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?',
+            'UPDATE users SET password = ?, password_is_set = 1, updated_at = NOW() WHERE id = ?',
             [password_hash($password, PASSWORD_DEFAULT), $actor['id']]
         );
         $this->respondSuccess(null, 'Password changed successfully.');
+    }
+
+    public function deactivateOwnAccount()
+    {
+        $this->api->require_method('POST');
+        $actor = $this->authenticate();
+        if ($actor['role'] !== 'resident') {
+            $this->api->respond_error('Only residents can deactivate their own account here.', 403);
+        }
+
+        $input = $this->api->body();
+        $reason = $input['reason'] ?? '';
+        $details = $input['reason_details'] ?? '';
+        $reasonLabels = [
+            'no_longer_needed' => 'I no longer need the account',
+            'taking_a_break' => 'I am taking a break',
+            'privacy_concerns' => 'Privacy concerns',
+            'too_many_notifications' => 'Too many notifications',
+            'difficulty_using_app' => 'Difficulty using Baco360',
+            'other' => 'Other',
+        ];
+        if (!is_string($reason) || !array_key_exists($reason, $reasonLabels)
+            || !is_string($details) || strlen($details) > 500) {
+            $this->api->respond_error('Choose a valid deactivation reason.', 422);
+        }
+        $details = trim($details);
+        if ($reason === 'other' && $details === '') {
+            $this->api->respond_error('Please explain your reason for deactivating the account.', 422);
+        }
+        $reasonDescription = $reasonLabels[$reason] . ($details !== '' ? ': ' . $details : '');
+
+        if (!$this->db->transaction()) {
+            $this->api->respond_error('Could not deactivate the account. Please try again.', 500);
+        }
+        try {
+            $this->db->raw(
+                'UPDATE users SET is_active = 0, auth_version = auth_version + 1, updated_at = NOW() WHERE id = ?',
+                [$actor['id']]
+            );
+            $this->db->raw('DELETE FROM refresh_tokens WHERE user_id = ?', [$actor['id']]);
+            $this->actor = $actor;
+            $this->audit('deactivated', 'users', $actor['id'], 'Resident deactivated their account. Reason: ' . $reasonDescription);
+            $this->db->commit();
+        } catch (Throwable $error) {
+            $this->db->roll_back();
+            throw $error;
+        }
+
+        $this->respondSuccess(null, 'Account deactivated. Sign in again to reactivate it.');
+    }
+
+    public function deleteOwnAccount()
+    {
+        $this->api->require_method('DELETE');
+        $actor = $this->authenticate();
+        if ($actor['role'] !== 'resident') {
+            $this->api->respond_error('Only residents can delete their own account here.', 403);
+        }
+
+        $input = $this->api->body();
+        $password = $input['password'] ?? null;
+        if (!is_string($password) || $password === '' || strlen($password) > 1024) {
+            $this->api->respond_error('Enter your password to delete the account.', 422);
+        }
+        if (!$this->db->transaction()) {
+            $this->api->respond_error('Could not delete the account. Please try again.', 500);
+        }
+
+        try {
+            $user = $this->db->raw(
+                'SELECT password, password_is_set, profile_photo FROM users WHERE id = ? FOR UPDATE',
+                [$actor['id']]
+            )->fetch(PDO::FETCH_ASSOC);
+            if (!$user) {
+                $this->db->roll_back();
+                $this->api->respond_error('Account not found.', 404);
+            }
+            if ((int) $user['password_is_set'] !== 1) {
+                $this->db->roll_back();
+                $this->api->respond_error('Set a password in Account Settings before deleting your Google account.', 422);
+            }
+            if (!password_verify($password, $user['password'])) {
+                $this->db->roll_back();
+                $this->api->respond_error('Your password is incorrect.', 422);
+            }
+
+            $references = [
+                'reports' => 'resident_id',
+                'report_comments' => 'user_id',
+                'report_assignments' => 'staff_id',
+                'community_report_comments' => 'user_id',
+                'community_report_reactions' => 'user_id',
+                'community_events' => 'created_by',
+                'announcements' => 'created_by',
+            ];
+            foreach ($references as $table => $column) {
+                $count = $this->db->raw(
+                    'SELECT COUNT(*) FROM ' . $table . ' WHERE ' . $column . ' = ?',
+                    [$actor['id']]
+                )->fetchColumn();
+                if ((int) $count > 0) {
+                    $this->db->roll_back();
+                    $this->api->respond_error('This account has linked community records and cannot be deleted. Deactivate it instead.', 409);
+                }
+            }
+
+            $this->deleteStoredProfilePhoto($user['profile_photo'] ?? null);
+            foreach (['email_verification_tokens', 'password_reset_tokens', 'user_contact_change_tokens', 'notification_settings', 'resident_profiles'] as $table) {
+                $this->db->raw('DELETE FROM ' . $table . ' WHERE user_id = ?', [$actor['id']]);
+            }
+            $this->db->raw('DELETE FROM user_notifications WHERE recipient_id = ?', [$actor['id']]);
+            $this->db->raw('UPDATE user_notifications SET actor_id = NULL WHERE actor_id = ?', [$actor['id']]);
+            $this->db->raw('DELETE FROM notifications WHERE recipient_id = ?', [$actor['id']]);
+            $this->db->raw('UPDATE notifications SET actor_id = NULL WHERE actor_id = ?', [$actor['id']]);
+            $this->db->raw('DELETE FROM refresh_tokens WHERE user_id = ?', [$actor['id']]);
+            $this->db->raw('DELETE FROM users WHERE id = ?', [$actor['id']]);
+            $this->db->commit();
+        } catch (Throwable $error) {
+            $this->db->roll_back();
+            throw $error;
+        }
+
+        $this->respondSuccess(null, 'Account deleted.');
+    }
+
+    private function deleteStoredProfilePhoto($path)
+    {
+        if (!is_string($path) || preg_match('/\Aprofile-photos\/[a-f0-9]{32}\.(jpg|png|webp)\z/', $path) !== 1) {
+            return;
+        }
+        $filePath = ROOT_DIR . 'runtime/uploads/' . $path;
+        if (is_file($filePath) && !unlink($filePath)) {
+            throw new RuntimeException('Unable to remove the account profile photo.');
+        }
     }
 
     public function updateNotificationSettings()
@@ -482,9 +787,29 @@ class AuthController extends ApiBaseController
     public function logout()
     {
         $this->api->require_method('POST');
-        $this->authenticate();
+        $actor = $this->authenticate();
         $input = $this->api->body();
-        if (!empty($input['refresh_token'])) $this->api->revoke_refresh_token($input['refresh_token']);
+        $refreshToken = $input['refresh_token'] ?? '';
+        $refreshPayload = null;
+        if ($refreshToken !== '' && $refreshToken !== null) {
+            $refreshPayload = is_string($refreshToken) ? $this->api->validate_jwt($refreshToken, 'refresh') : null;
+            if (!$refreshPayload || (int) ($refreshPayload['sub'] ?? 0) !== (int) $actor['id']
+                || ($this->sessionId !== null && !hash_equals($this->sessionId, (string) ($refreshPayload['session_id'] ?? '')))) {
+                $this->api->respond_error('Invalid refresh token for this session.', 403);
+            }
+        }
+        $sessionIdToRevoke = $this->sessionId ?? ($refreshPayload['session_id'] ?? null);
+        if (is_string($sessionIdToRevoke)) {
+            $this->db->raw(
+                'DELETE FROM refresh_tokens WHERE user_id = ? AND session_id = ?',
+                [$actor['id'], $sessionIdToRevoke]
+            );
+        } elseif ($refreshPayload && !empty($refreshPayload['jti'])) {
+            $this->db->raw(
+                'DELETE FROM refresh_tokens WHERE user_id = ? AND jti = ?',
+                [$actor['id'], $refreshPayload['jti']]
+            );
+        }
         $this->respondSuccess(null, 'Logged out successfully.');
     }
 
@@ -510,6 +835,13 @@ class AuthController extends ApiBaseController
 
     private function userWithSettings($user)
     {
+        $passwordIsSet = $this->db->raw(
+            'SELECT password_is_set FROM users WHERE id = ? LIMIT 1',
+            [$user['id']]
+        )->fetchColumn();
+        $user['has_password'] = $passwordIsSet === false || $passwordIsSet === null
+            ? true
+            : (int) $passwordIsSet === 1;
         $user['notification_settings'] = $this->getNotificationSettings($user['id']);
         return $this->withProfilePhotoUrl($user);
     }

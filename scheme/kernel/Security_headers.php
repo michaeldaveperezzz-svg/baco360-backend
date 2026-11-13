@@ -70,7 +70,7 @@ class Security_headers
         'cors' => [
             'allowed_origins' => [],
             'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-            'headers'         => 'Authorization, Content-Type, X-Requested-With',
+            'headers'         => 'Authorization, Content-Type, X-Requested-With, X-Refresh-Token',
             'expose_headers'  => 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After',
             'credentials'     => false,
             'max_age'         => 600,
